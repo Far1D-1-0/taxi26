@@ -9,7 +9,10 @@ import Config
 
 config :taxi_be,
   generators: [timestamp_type: :utc_datetime],
-  driver_response_timeout_ms: 90_000
+  driver_response_timeout_ms: 90_000,
+  taxi_arrival_ms: 300_000,
+  cancellation_penalty_window_ms: 180_000,
+  cancellation_fee: 20
 
 # Configures the endpoint
 config :taxi_be, TaxiBeWeb.Endpoint,

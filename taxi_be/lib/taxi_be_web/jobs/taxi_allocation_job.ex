@@ -15,9 +15,13 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
     {:ok,
      %{
        request: request,
+       phase: :searching,
        contacted_taxis: %{},
        rejected_drivers: MapSet.new(),
-       response_timer_ref: nil
+       response_timer_ref: nil,
+       accepted_driver: nil,
+       arrival_timer_ref: nil,
+       arrival_deadline_ms: nil
      }}
   end
 
@@ -83,6 +87,7 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
   def handle_info(
         {:step2, "accept", driver},
         %{
+          phase: :searching,
           request: request,
           contacted_taxis: contacted_taxis,
           response_timer_ref: timer_ref
@@ -101,12 +106,26 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
     )
 
     close_driver_requests(state, "#{driver} aceptó el viaje")
-    {:stop, :normal, state}
+
+    arrival_ms = taxi_arrival_ms()
+    booking_id = request["booking_id"]
+    arrival_timer_ref = Process.send_after(self(), {:taxi_arrived, booking_id}, arrival_ms)
+
+    {:noreply,
+     %{
+       state
+       | phase: :allocated,
+         response_timer_ref: nil,
+         accepted_driver: Map.fetch!(contacted_taxis, driver),
+         arrival_timer_ref: arrival_timer_ref,
+         arrival_deadline_ms: monotonic_ms() + arrival_ms
+     }}
   end
 
   def handle_info(
         {:step2, "reject", driver},
         %{
+          phase: :searching,
           contacted_taxis: contacted_taxis,
           rejected_drivers: rejected_drivers,
           response_timer_ref: timer_ref
@@ -128,7 +147,10 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
 
   def handle_info(
         {:driver_group_timeout, booking_id},
-        %{request: %{"booking_id" => booking_id}} = state
+        %{
+          phase: :searching,
+          request: %{"booking_id" => booking_id}
+        } = state
       ) do
     notify_customer_unavailable(state.request)
     close_driver_requests(state, "La solicitud expiró")
@@ -142,6 +164,74 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
   def handle_info({:step2, action, driver}, state)
       when action in ["accept", "reject"] do
     IO.inspect("Respuesta tardía de #{driver} ignorada")
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:cancel, customer},
+        %{
+          phase: :searching,
+          request: %{"username" => customer},
+          response_timer_ref: timer_ref
+        } = state
+      ) do
+    cancel_timer(timer_ref)
+    close_driver_requests(state, "El cliente canceló el viaje")
+    notify_customer_cancellation(state.request, 0)
+    {:stop, :normal, state}
+  end
+
+  def handle_info(
+        {:cancel, customer},
+        %{
+          phase: :allocated,
+          request: %{"username" => customer},
+          accepted_driver: accepted_driver,
+          arrival_timer_ref: arrival_timer_ref,
+          arrival_deadline_ms: arrival_deadline_ms
+        } = state
+      ) do
+    cancel_timer(arrival_timer_ref)
+
+    remaining_ms = max(arrival_deadline_ms - monotonic_ms(), 0)
+
+    fee =
+      if remaining_ms <= cancellation_penalty_window_ms() do
+        cancellation_fee()
+      else
+        0
+      end
+
+    notify_driver_cancellation(accepted_driver, state.request, fee)
+    notify_customer_cancellation(state.request, fee)
+    {:stop, :normal, state}
+  end
+
+  def handle_info({:cancel, _customer}, state) do
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:taxi_arrived, booking_id},
+        %{
+          phase: :allocated,
+          request: %{"booking_id" => booking_id, "username" => customer},
+          accepted_driver: accepted_driver
+        } = state
+      ) do
+    TaxiBeWeb.Endpoint.broadcast(
+      "customer:" <> customer,
+      "booking_closed",
+      %{
+        bookingId: booking_id,
+        msg: "#{accepted_driver.nickname} llegó. El viaje puede comenzar."
+      }
+    )
+
+    {:stop, :normal, state}
+  end
+
+  def handle_info({:taxi_arrived, _booking_id}, state) do
     {:noreply, state}
   end
 
@@ -205,8 +295,50 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
     end)
   end
 
+  defp notify_customer_cancellation(request, fee) do
+    message =
+      if fee > 0 do
+        "Viaje cancelado. Se aplicó un cargo de $#{fee}."
+      else
+        "Viaje cancelado sin cargo."
+      end
+
+    TaxiBeWeb.Endpoint.broadcast(
+      "customer:" <> request["username"],
+      "booking_closed",
+      %{bookingId: request["booking_id"], msg: message}
+    )
+  end
+
+  defp notify_driver_cancellation(driver, request, fee) do
+    TaxiBeWeb.Endpoint.broadcast(
+      "driver:" <> driver.nickname,
+      "booking_cancelled",
+      %{
+        bookingId: request["booking_id"],
+        msg: "El cliente canceló el viaje. Cargo aplicado: $#{fee}."
+      }
+    )
+  end
+
   defp driver_response_timeout_ms do
     Application.get_env(:taxi_be, :driver_response_timeout_ms, 60_000)
+  end
+
+  defp taxi_arrival_ms do
+    Application.get_env(:taxi_be, :taxi_arrival_ms, 300_000)
+  end
+
+  defp cancellation_penalty_window_ms do
+    Application.get_env(:taxi_be, :cancellation_penalty_window_ms, 180_000)
+  end
+
+  defp cancellation_fee do
+    Application.get_env(:taxi_be, :cancellation_fee, 20)
+  end
+
+  defp monotonic_ms do
+    System.monotonic_time(:millisecond)
   end
 
   defp cancel_timer(nil), do: :ok

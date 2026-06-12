@@ -8,6 +8,7 @@ function Driver(props) {
   let [message, setMessage] = useState();
   let [bookingId, setBookingId] = useState();
   let [visible, setVisible] = useState(false);
+  let [notice, setNotice] = useState("");
 
   useEffect(() => {
     const topic = "driver:" + props.username;
@@ -18,9 +19,14 @@ function Driver(props) {
       setMessage(data.msg);
       setBookingId(data.bookingId);
       setVisible(true);
+      setNotice("");
     });
     channel.on("booking_closed", () => {
       setVisible(false);
+    });
+    channel.on("booking_cancelled", data => {
+      setVisible(false);
+      setNotice(data.msg);
     });
 
     channel.join()
@@ -67,6 +73,7 @@ function Driver(props) {
             null
           }
         </div>
+        <div>{notice}</div>
     </div>
   );
 }

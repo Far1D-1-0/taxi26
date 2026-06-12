@@ -9,6 +9,7 @@ function Customer(props) {
   let [dropOffAddress, setDropOffAddress] = useState("Triangulo Las Animas, Puebla, Mexico");
   let [msg, setMsg] = useState("");
   let [msg1, setMsg1] = useState("");
+  let [bookingId, setBookingId] = useState();
 
   useEffect(() => {
     const topic = "customer:" + props.username;
@@ -18,6 +19,11 @@ function Customer(props) {
     channel.on("booking_request", dataFromPush => {
       console.log("Received", dataFromPush);
       setMsg1(dataFromPush.msg);
+    });
+    channel.on("booking_closed", dataFromPush => {
+      console.log("Closed", dataFromPush);
+      setMsg1(dataFromPush.msg);
+      setBookingId(undefined);
     });
 
     channel.join()
@@ -35,7 +41,22 @@ function Customer(props) {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({pickup_address: pickupAddress, dropoff_address: dropOffAddress, username: props.username})
-    }).then(resp => resp.json()).then(dataFromPOST => setMsg(dataFromPOST.msg));
+    })
+      .then(resp => resp.json())
+      .then(dataFromPOST => {
+        setMsg(dataFromPOST.msg);
+        setBookingId(dataFromPOST.bookingId);
+      });
+  };
+
+  let cancel = () => {
+    fetch(`http://localhost:4000/api/bookings/${bookingId}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: "cancel", username: props.username})
+    })
+      .then(resp => resp.json())
+      .then(dataFromPOST => setMsg(dataFromPOST.msg));
   };
 
   return (
@@ -51,6 +72,11 @@ function Customer(props) {
             onChange={ev => setDropOffAddress(ev.target.value)}
             value={dropOffAddress}/>
         <Button onClick={submit} variant="outlined" color="primary">Submit</Button>
+        {
+          bookingId ?
+          <Button onClick={cancel} variant="outlined" color="secondary">Cancel</Button> :
+          null
+        }
       </div>
       <div style={{backgroundColor: "lightcyan", height: "50px"}}>
         {msg}
