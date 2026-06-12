@@ -1,4 +1,4 @@
-import React, {useEffect, useState} from 'react';
+import {useEffect, useState} from 'react';
 import Button from '@mui/material/Button'
 
 import socket from '../services/taxi_socket';
@@ -11,14 +11,24 @@ function Customer(props) {
   let [msg1, setMsg1] = useState("");
 
   useEffect(() => {
-    let channel = socket.channel("customer:" + props.username, {token: "123"});
+    const topic = "customer:" + props.username;
+    const channel = socket.channel(topic, {token: "123"});
+
     channel.on("greetings", data => console.log(data));
     channel.on("booking_request", dataFromPush => {
       console.log("Received", dataFromPush);
       setMsg1(dataFromPush.msg);
     });
-    channel.join();
-  },[props]);
+
+    channel.join()
+      .receive("ok", () => console.log(`Joined ${topic}`))
+      .receive("error", response => console.error(`Unable to join ${topic}`, response))
+      .receive("timeout", () => console.error(`Timed out joining ${topic}`));
+
+    return () => {
+      channel.leave();
+    };
+  }, [props.username]);
 
   let submit = () => {
     fetch(`http://localhost:4000/api/bookings`, {

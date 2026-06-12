@@ -5,18 +5,20 @@ defmodule TaxiBeWeb.Geolocator do
 
   def geocode(address) do
     case HTTPoison.get(
-      @geocodingURL <> URI.encode(address) <>
-      ".json?access_token=" <> @token
-    ) do
+           @geocodingURL <>
+             URI.encode(address) <>
+             ".json?access_token=" <> token!()
+         ) do
       {:ok, %{body: bodyStr}} ->
-        { :ok,
-          bodyStr
-          |> Jason.decode!
-          |> Map.fetch!("features")
-          |> hd
-          |> Map.fetch!("center")
-        }
-      _ -> {:error, "Something wrong with Mapbox call"}
+        {:ok,
+         bodyStr
+         |> Jason.decode!()
+         |> Map.fetch!("features")
+         |> hd
+         |> Map.fetch!("center")}
+
+      _ ->
+        {:error, "Something wrong with Mapbox call"}
     end
   end
 
@@ -24,30 +26,37 @@ defmodule TaxiBeWeb.Geolocator do
     %{body: body} =
       HTTPoison.get!(
         @directionsURL <>
-        "#{Enum.join(origin_coord, ",")};#{Enum.join(destination_coord, ",")}" <>
-        "?access_token=" <> @token)
+          "#{Enum.join(origin_coord, ",")};#{Enum.join(destination_coord, ",")}" <>
+          "?access_token=" <> token!()
+      )
 
     %{"duration" => duration, "distance" => distance} =
       body
-      |> Jason.decode!
+      |> Jason.decode!()
       |> Map.fetch!("routes")
       |> hd
+
     {distance, duration}
   end
 
-
   def destination_and_duration(driver_coords, destination_coords) do
-    list_of_coords = [destination_coords|driver_coords]
-    %{body: body} = HTTPoison.get!(@distanceMatrixURL <>
-      "#{
-        Enum.map(list_of_coords, fn coords -> Enum.join(coords, ",") end)
-        |> Enum.join(";")}" <>
-      "?sources=0&access_token=" <> @token)
+    list_of_coords = [destination_coords | driver_coords]
+
+    %{body: body} =
+      HTTPoison.get!(
+        @distanceMatrixURL <>
+          "#{Enum.map(list_of_coords, fn coords -> Enum.join(coords, ",") end) |> Enum.join(";")}" <>
+          "?sources=0&access_token=" <> token!()
+      )
 
     body
-    |> Jason.decode!
+    |> Jason.decode!()
     |> Map.fetch!("durations")
-    |> List.flatten
+    |> List.flatten()
     |> tl
+  end
+
+  defp token! do
+    System.fetch_env!("MAPBOX_ACCESS_TOKEN")
   end
 end

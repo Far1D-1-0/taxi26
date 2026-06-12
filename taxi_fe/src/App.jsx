@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import './App.css'
 import Customer from './components/Customer';
 import Driver from './components/Driver';
