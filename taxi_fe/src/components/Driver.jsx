@@ -19,6 +19,9 @@ function Driver(props) {
       setBookingId(data.bookingId);
       setVisible(true);
     });
+    channel.on("booking_closed", () => {
+      setVisible(false);
+    });
 
     channel.join()
       .receive("ok", () => console.log(`Joined ${topic}`))

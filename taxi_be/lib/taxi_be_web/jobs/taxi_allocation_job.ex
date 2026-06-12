@@ -15,8 +15,8 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
     {:ok,
      %{
        request: request,
-       available_taxis: [],
-       contacted_taxi: nil,
+       contacted_taxis: %{},
+       rejected_drivers: MapSet.new(),
        response_timer_ref: nil
      }}
   end
@@ -34,14 +34,14 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
     selected_candidate_taxis = Task.await(candidate_taxis_task, 30_000)
     Task.await(ride_fare_task, 30_000)
 
-    Process.send(self(), :contact_next_taxi, [:nosuspend])
+    Process.send(self(), {:contact_taxis, selected_candidate_taxis}, [:nosuspend])
 
-    {:noreply, %{state | available_taxis: selected_candidate_taxis}}
+    {:noreply, state}
   end
 
   def handle_info(
-        :contact_next_taxi,
-        %{request: request, available_taxis: [taxi | remaining_taxis]} = state
+        {:contact_taxis, [_ | _] = taxis},
+        %{request: request} = state
       ) do
     %{
       "pickup_address" => pickup_address,
@@ -49,51 +49,34 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
       "booking_id" => booking_id
     } = request
 
-    TaxiBeWeb.Endpoint.broadcast(
-      "driver:" <> taxi.nickname,
-      "booking_request",
-      %{
-        msg: "Viaje de '#{pickup_address}' a '#{dropoff_address}'",
-        bookingId: booking_id
-      }
-    )
+    Enum.each(taxis, fn taxi ->
+      TaxiBeWeb.Endpoint.broadcast(
+        "driver:" <> taxi.nickname,
+        "booking_request",
+        %{
+          msg: "Viaje de '#{pickup_address}' a '#{dropoff_address}'",
+          bookingId: booking_id
+        }
+      )
+    end)
 
     timer_ref =
       Process.send_after(
         self(),
-        {:driver_timeout, taxi.nickname},
+        {:driver_group_timeout, booking_id},
         driver_response_timeout_ms()
       )
 
     {:noreply,
      %{
        state
-       | contacted_taxi: taxi,
-         available_taxis: remaining_taxis,
+       | contacted_taxis: Map.new(taxis, &{&1.nickname, &1}),
          response_timer_ref: timer_ref
      }}
   end
 
-  def handle_info(
-        :contact_next_taxi,
-        %{request: request, available_taxis: []} = state
-      ) do
-    %{
-      "pickup_address" => pickup_address,
-      "dropoff_address" => dropoff_address,
-      "username" => username
-    } = request
-
-    TaxiBeWeb.Endpoint.broadcast(
-      "customer:" <> username,
-      "booking_request",
-      %{
-        msg:
-          "Viaje de '#{pickup_address}' a '#{dropoff_address}' cancelado: " <>
-            "no hay conductores disponibles"
-      }
-    )
-
+  def handle_info({:contact_taxis, []}, state) do
+    notify_customer_unavailable(state.request)
     {:stop, :normal, state}
   end
 
@@ -101,10 +84,11 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
         {:step2, "accept", driver},
         %{
           request: request,
-          contacted_taxi: %{nickname: driver},
+          contacted_taxis: contacted_taxis,
           response_timer_ref: timer_ref
         } = state
-      ) do
+      )
+      when is_map_key(contacted_taxis, driver) do
     cancel_timer(timer_ref)
     customer = request["username"]
 
@@ -116,45 +100,42 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
       }
     )
 
+    close_driver_requests(state, "#{driver} aceptó el viaje")
     {:stop, :normal, state}
   end
 
   def handle_info(
         {:step2, "reject", driver},
         %{
-          contacted_taxi: %{nickname: driver},
+          contacted_taxis: contacted_taxis,
+          rejected_drivers: rejected_drivers,
           response_timer_ref: timer_ref
         } = state
-      ) do
-    cancel_timer(timer_ref)
+      )
+      when is_map_key(contacted_taxis, driver) do
     IO.inspect("#{driver} rechazó el viaje")
+    rejected_drivers = MapSet.put(rejected_drivers, driver)
 
-    Process.send(self(), :contact_next_taxi, [:nosuspend])
-
-    {:noreply,
-     %{
-       state
-       | contacted_taxi: nil,
-         response_timer_ref: nil
-     }}
+    if MapSet.size(rejected_drivers) == map_size(contacted_taxis) do
+      cancel_timer(timer_ref)
+      notify_customer_unavailable(state.request)
+      close_driver_requests(state, "Ningún conductor aceptó el viaje")
+      {:stop, :normal, %{state | rejected_drivers: rejected_drivers}}
+    else
+      {:noreply, %{state | rejected_drivers: rejected_drivers}}
+    end
   end
 
   def handle_info(
-        {:driver_timeout, driver},
-        %{contacted_taxi: %{nickname: driver}} = state
+        {:driver_group_timeout, booking_id},
+        %{request: %{"booking_id" => booking_id}} = state
       ) do
-    IO.inspect("#{driver} no respondió a tiempo")
-    Process.send(self(), :contact_next_taxi, [:nosuspend])
-
-    {:noreply,
-     %{
-       state
-       | contacted_taxi: nil,
-         response_timer_ref: nil
-     }}
+    notify_customer_unavailable(state.request)
+    close_driver_requests(state, "La solicitud expiró")
+    {:stop, :normal, %{state | response_timer_ref: nil}}
   end
 
-  def handle_info({:driver_timeout, _driver}, state) do
+  def handle_info({:driver_group_timeout, _booking_id}, state) do
     {:noreply, state}
   end
 
@@ -192,6 +173,36 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
       %{nickname: "samwise", latitude: 19.0061167, longitude: -98.2697737},
       %{nickname: "pippin", latitude: 19.0092933, longitude: -98.2473716}
     ]
+  end
+
+  defp notify_customer_unavailable(request) do
+    %{
+      "pickup_address" => pickup_address,
+      "dropoff_address" => dropoff_address,
+      "username" => username
+    } = request
+
+    TaxiBeWeb.Endpoint.broadcast(
+      "customer:" <> username,
+      "booking_request",
+      %{
+        msg:
+          "Viaje de '#{pickup_address}' a '#{dropoff_address}' cancelado: " <>
+            "ningún conductor aceptó la solicitud"
+      }
+    )
+  end
+
+  defp close_driver_requests(state, message) do
+    booking_id = state.request["booking_id"]
+
+    Enum.each(state.contacted_taxis, fn {nickname, _taxi} ->
+      TaxiBeWeb.Endpoint.broadcast(
+        "driver:" <> nickname,
+        "booking_closed",
+        %{bookingId: booking_id, msg: message}
+      )
+    end)
   end
 
   defp driver_response_timeout_ms do
