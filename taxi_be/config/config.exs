@@ -8,7 +8,8 @@
 import Config
 
 config :taxi_be,
-  generators: [timestamp_type: :utc_datetime]
+  generators: [timestamp_type: :utc_datetime],
+  driver_response_timeout_ms: 60_000
 
 # Configures the endpoint
 config :taxi_be, TaxiBeWeb.Endpoint,

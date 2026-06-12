@@ -11,7 +11,14 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
 
   def init(request) do
     Process.send(self(), :step1, [:nosuspend])
-    {:ok, %{request: request, available_taxis: [], contacted_taxi: nil}}
+
+    {:ok,
+     %{
+       request: request,
+       available_taxis: [],
+       contacted_taxi: nil,
+       response_timer_ref: nil
+     }}
   end
 
   def handle_info(:step1, %{request: request} = state) do
@@ -51,11 +58,19 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
       }
     )
 
+    timer_ref =
+      Process.send_after(
+        self(),
+        {:driver_timeout, taxi.nickname},
+        driver_response_timeout_ms()
+      )
+
     {:noreply,
      %{
        state
        | contacted_taxi: taxi,
-         available_taxis: remaining_taxis
+         available_taxis: remaining_taxis,
+         response_timer_ref: timer_ref
      }}
   end
 
@@ -84,8 +99,13 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
 
   def handle_info(
         {:step2, "accept", driver},
-        %{request: request} = state
+        %{
+          request: request,
+          contacted_taxi: %{nickname: driver},
+          response_timer_ref: timer_ref
+        } = state
       ) do
+    cancel_timer(timer_ref)
     customer = request["username"]
 
     TaxiBeWeb.Endpoint.broadcast(
@@ -101,12 +121,47 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
 
   def handle_info(
         {:step2, "reject", driver},
-        state
+        %{
+          contacted_taxi: %{nickname: driver},
+          response_timer_ref: timer_ref
+        } = state
       ) do
+    cancel_timer(timer_ref)
     IO.inspect("#{driver} rechazó el viaje")
 
     Process.send(self(), :contact_next_taxi, [:nosuspend])
-    {:noreply, %{state | contacted_taxi: nil}}
+
+    {:noreply,
+     %{
+       state
+       | contacted_taxi: nil,
+         response_timer_ref: nil
+     }}
+  end
+
+  def handle_info(
+        {:driver_timeout, driver},
+        %{contacted_taxi: %{nickname: driver}} = state
+      ) do
+    IO.inspect("#{driver} no respondió a tiempo")
+    Process.send(self(), :contact_next_taxi, [:nosuspend])
+
+    {:noreply,
+     %{
+       state
+       | contacted_taxi: nil,
+         response_timer_ref: nil
+     }}
+  end
+
+  def handle_info({:driver_timeout, _driver}, state) do
+    {:noreply, state}
+  end
+
+  def handle_info({:step2, action, driver}, state)
+      when action in ["accept", "reject"] do
+    IO.inspect("Respuesta tardía de #{driver} ignorada")
+    {:noreply, state}
   end
 
   def compute_ride_fare(request) do
@@ -137,5 +192,16 @@ defmodule TaxiBeWeb.TaxiAllocationJob do
       %{nickname: "samwise", latitude: 19.0061167, longitude: -98.2697737},
       %{nickname: "pippin", latitude: 19.0092933, longitude: -98.2473716}
     ]
+  end
+
+  defp driver_response_timeout_ms do
+    Application.get_env(:taxi_be, :driver_response_timeout_ms, 60_000)
+  end
+
+  defp cancel_timer(nil), do: :ok
+
+  defp cancel_timer(timer_ref) do
+    Process.cancel_timer(timer_ref)
+    :ok
   end
 end
